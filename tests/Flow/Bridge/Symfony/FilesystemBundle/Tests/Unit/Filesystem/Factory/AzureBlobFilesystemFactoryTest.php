@@ -8,7 +8,9 @@ use Flow\Azure\SDK\BlobServiceInterface;
 use Flow\Bridge\Symfony\FilesystemBundle\Exception\InvalidArgumentException;
 use Flow\Bridge\Symfony\FilesystemBundle\Filesystem\Factory\AzureBlobFilesystemFactory;
 use Flow\Filesystem\Bridge\Azure\AzureBlobFilesystem;
+use Generator;
 use Nyholm\Psr7\Factory\Psr17Factory;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 use stdClass;
@@ -27,6 +29,30 @@ final class AzureBlobFilesystemFactoryTest extends TestCase
         ]);
 
         static::assertInstanceOf(AzureBlobFilesystem::class, $filesystem);
+    }
+
+    public function test_applies_copy_part_size_option(): void
+    {
+        $filesystem = (new AzureBlobFilesystemFactory())->create('azure-blob', [
+            'container' => 'c',
+            'client' => ['account_name' => 'a', 'auth' => ['shared_key' => base64_encode('k')]],
+            'options' => ['copy_part_size' => 5 * 1024 * 1024],
+        ]);
+
+        static::assertInstanceOf(AzureBlobFilesystem::class, $filesystem);
+        static::assertSame(5 * 1024 * 1024, $filesystem->normalize()['options']['copy_part_size'] ?? null);
+    }
+
+    public function test_throws_on_invalid_copy_part_size_type(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('`options.copy_part_size` must be an integer.');
+
+        (new AzureBlobFilesystemFactory())->create('azure-blob', [
+            'container' => 'c',
+            'client' => ['account_name' => 'a', 'auth' => ['shared_key' => 'k']],
+            'options' => ['copy_part_size' => 'nope'],
+        ]);
     }
 
     public function test_mode_a_builds_filesystem_from_resolved_client(): void
@@ -254,6 +280,7 @@ final class AzureBlobFilesystemFactoryTest extends TestCase
                 'container' => 'c',
                 'shared_key' => base64_encode('k'),
                 'url' => ['azurite' => ['host' => '127.0.0.1', 'port' => '10000', 'https' => false]],
+                'http' => ['timeout' => 30, 'max_duration' => 300, 'max_retries' => 3],
             ],
             $configuration['blob_service'],
         );
@@ -286,5 +313,63 @@ final class AzureBlobFilesystemFactoryTest extends TestCase
                 ])
                 ->normalize(),
         );
+    }
+
+    public static function injected_services(): Generator
+    {
+        yield 'http client' => ['http_client', new Psr18Client()];
+        yield 'request factory' => ['request_factory', new Psr17Factory()];
+        yield 'stream factory' => ['stream_factory', new Psr17Factory()];
+        yield 'logger' => ['logger', new NullLogger()];
+    }
+
+    public function test_client_http_keeps_the_filesystem_describable(): void
+    {
+        $configuration = (new AzureBlobFilesystemFactory())
+            ->create('azure-blob', [
+                'container' => 'c',
+                'client' => [
+                    'account_name' => 'a',
+                    'auth' => ['shared_key' => base64_encode('k')],
+                    'http' => ['timeout' => 1, 'max_duration' => 2, 'max_retries' => 0],
+                ],
+            ])
+            ->normalize();
+
+        static::assertNotNull($configuration);
+        static::assertSame(
+            ['timeout' => 1, 'max_duration' => 2, 'max_retries' => 0],
+            $configuration['blob_service']['http'] ?? null,
+        );
+    }
+
+    public function test_client_http_must_be_an_array(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Filesystem factory for backend "azure_blob" `client.http` must be an array.');
+
+        (new AzureBlobFilesystemFactory())->create('azure-blob', [
+            'container' => 'c',
+            'client' => ['account_name' => 'a', 'auth' => ['shared_key' => base64_encode('k')], 'http' => 30],
+        ]);
+    }
+
+    #[DataProvider('injected_services')]
+    public function test_client_http_with_an_injected_service_is_rejected(string $service, object $instance): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'Filesystem factory for backend "azure_blob": client.http cannot be used together with client.http_client_service, client.request_factory_service, client.stream_factory_service or client.logger_service_id, because the limits apply only to the client the bundle builds.',
+        );
+
+        (new AzureBlobFilesystemFactory())->create('azure-blob', [
+            'container' => 'c',
+            'client' => [
+                'account_name' => 'a',
+                'auth' => ['shared_key' => base64_encode('k')],
+                'http' => ['timeout' => 1],
+                $service => $instance,
+            ],
+        ]);
     }
 }
